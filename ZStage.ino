@@ -89,11 +89,19 @@ void move(int axis, int direction, int steps_to_move, int extra_delay = 0, int i
 }
 
 void home() {
-    // move all stages upward until a limit condition occurs.
-    Serial.println("Moving 100 steps towards home");
+    // steps to move before refreshing the while loop
+    // effectively sets position resolution
+    int _stepchunk = 100;
+    // move all stages upward until a limit condition occurs
     while (LIMSTATE == false)
     {
-        move(0, 0, 100);
+        move(0, 0, _stepchunk);
+        // increment global step counts
+        noInterrupts();
+        for (int i = 0; i < 3; i++)
+        {
+            
+        }
     }
 }
 /*  home_axis(int axis, int steps=100) - Homes a specific axis in 100 step
@@ -208,9 +216,9 @@ String get_substring(int begin_pos, int end_pos, String tempstring)
     }
     return return_string;
 }
-/*  serial_available() - ISR that fires when serial data is on the UART.
+/*  SerialEvent() - ISR that fires when serial data is on the UART.
 */
-void serial_available()
+void SerialEvent()
 {
     /*
         Serial Message Format:
@@ -221,5 +229,5 @@ void serial_available()
         dont use windows line endings you dolt.
         \n only. UART will autoappend \0
     */
-
+    return;
 }
