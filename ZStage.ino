@@ -26,11 +26,10 @@ volatile bool LIMSTATE = false;
 volatile bool LIMITS[] = { false, false, false };
 // Counters for the encoders.
 // 0 = home
-volatile uint16_t AXES_COUNT[] = { 0, 0, 0 };
+volatile int32_t AXES_COUNT[] = { 0, 0, 0 };
 
 // Global serial flags
 volatile bool MOVE_REQUESTED = false;
-volatile bool MOVE_COMPLETED = false;
 
 int REQUESTED_AXIS;
 int REQUESTED_STEPS;
@@ -54,7 +53,7 @@ void move(int axis, int direction, int steps_to_move, int extra_delay = 0, int i
         }
         break;
     default:
-        digitalWriteFast(AX_EN[axis - 1], LOW);   // need to offset by 1 to get proper array position
+        digitalWriteFast(AX_EN[axis - 1], LOW);   // need to offset by -1 to get proper array position
         break;
     }
     // Set the direction.
@@ -67,8 +66,26 @@ void move(int axis, int direction, int steps_to_move, int extra_delay = 0, int i
     }
     // Begin moving
     int step_delay = 1200;
-    if (!ignore_collision)
+    if (ignore_collision == false)
     {
+        for (int i = 0; i < steps_to_move; i++)
+        {
+            if (LIMSTATE == false)
+            {
+                digitalWriteFast(STEPPIN, LOW);
+                delayMicroseconds(step_delay);
+                digitalWriteFast(STEPPIN, HIGH);
+                delayMicroseconds(step_delay);
+            }
+        }
+        // Disable all motors after move.
+        for (int i = 0; i < 3; i++)
+        {
+            digitalWriteFast(AX_EN[i], HIGH);
+        }
+    } else {
+        // TODO: Implement ignore-collision routine for moving
+        //       off of the limits if they're engaged.
         for (int i = 0; i < steps_to_move; i++)
         {
             digitalWriteFast(STEPPIN, LOW);
@@ -76,22 +93,19 @@ void move(int axis, int direction, int steps_to_move, int extra_delay = 0, int i
             digitalWriteFast(STEPPIN, HIGH);
             delayMicroseconds(step_delay);
         }
-        // Disable all motors after move.
+
+        // disable motors
         for (int i = 0; i < 3; i++)
         {
             digitalWriteFast(AX_EN[i], HIGH);
         }
-    }
-    else {
-        // TODO: Implement ignore-collision routine for moving
-        //       off of the limits if they're engaged.
     }
 }
 
 void home() {
     // steps to move before refreshing the while loop
     // effectively sets position resolution
-    int _stepchunk = 100;
+    int _stepchunk = 20;
     // move all stages upward until a limit condition occurs
     while (LIMSTATE == false)
     {
@@ -100,8 +114,9 @@ void home() {
         noInterrupts();
         for (int i = 0; i < 3; i++)
         {
-            
+            AXES_COUNT[i] -= _stepchunk;
         }
+        interrupts();
     }
 }
 /*  home_axis(int axis, int steps=100) - Homes a specific axis in 100 step
@@ -109,14 +124,20 @@ void home() {
                                          Purposely ignores LIMSTATE global so homing
                                          works while other axes are homed.
 */
-void home_axis(int axis, int steps = 100)
+void home_axis(int axis, int _stepchunk = 100)
 {
-    Serial.print("Homing axis no ");
-    Serial.println(String(axis));
-    while (LIMITS[axis - 1])
+    while (LIMITS[axis - 1] == false)
     {
-        move(axis, 0, steps);
+        move(axis, 0, _stepchunk);
+        AXES_COUNT[axis - 1] -= _stepchunk;
     }
+    delay(50);
+    noInterrupts();
+    if (LIMITS[axis - 1] == true)
+    {
+        AXES_COUNT[axis - 1] = 0;
+    }
+    interrupts();
 }
 /*  limit_switch_interrupt() - ISR to set the LIMITS[] flag for respective
                                axis it is attached to. Attach to pin CHANGE
@@ -136,9 +157,9 @@ void limit_switch_interrupt() {
             LIMITS[i] = false;
             digitalWriteFast(LEDOUT[i], LOW);
         }
-
     }
-    LIMSTATE = (LIMITS[0] || LIMITS[1]) || LIMITS[2];
+    // compute the global limit flag
+    LIMSTATE = LIMITS[0] || LIMITS[1] || LIMITS[2];
     interrupts();
 }
 
@@ -146,6 +167,7 @@ void limit_switch_interrupt() {
 */
 void setup() {
     // Attach the limit switch interrupt to each limit switch pin
+    // and set the relevant pin modes.
     for (int i = 0; i < 3; i++)
     {
         pinMode(LEDOUT[i], OUTPUT); pinMode(LIMPIN[i], INPUT_PULLDOWN);
@@ -172,6 +194,25 @@ void setup() {
 /*  loop() - Runs immediately after setup(). Loops.
 */
 void loop() {
+    check_data();
+    Serial.println(return_axis_steps());
+    if (MOVE_REQUESTED)     // if the move_requested flag is set, move the axis
+    {
+        int _nocollision;
+        if(REQUESTED_DIR == 1)
+        { 
+            _nocollision = 1;
+        }
+        else {
+            _nocollision = 0;
+        }
+        move(REQUESTED_AXIS, REQUESTED_AXIS, REQUESTED_STEPS, REQUESTED_XTRA_US, _nocollision);
+        // clear flag after successful move and set all globals to invalid values 
+        // to avoid triggering a homing sequence or random move.
+        MOVE_REQUESTED = false;
+        REQUESTED_AXIS = -1; REQUESTED_DIR = -1; REQUESTED_STEPS = -1; REQUESTED_XTRA_US = -1;
+    }
+    delay(500);
     /* Homing Test Code BEGIN
     move(0, 1, 3000, 0);
     Serial.println("Attempting to find common plane");
@@ -201,6 +242,116 @@ void loop() {
     REMOVE WHEN SERIAL REWRITE IS COMPLETED! REFERENCE ONLY!
     */
 }
+
+/*  return_axis_steps() - Returns a comma delimited report on the number of steps taken by the
+                          axes. Presently up to the controller software to do the z-conversion.
+                          TODO: Add z-displacement in real world units functionality.
+*/
+String return_axis_steps()
+{
+    String _tempstr;
+    for (int i = 0; i < 3; i++)
+    {
+        _tempstr += AXES_COUNT[i];
+        if (i != 2)
+        {
+            _tempstr += ",";
+        }
+    }
+    return _tempstr;
+}
+/*  check_data() - Looks for inbound data on the serial port.
+*/
+void check_data()
+{
+    /*
+        Serial Message Format:
+        AXIS,DIRECTION,STEPS,EXTRADELAYUS
+        N,N,NNNNNN,NNNNN\n\0
+        length - 20 (incl null termination)
+        n - number
+        dont use windows line endings you dolt.
+        \n only. UART will autoappend \0
+    */
+    if (Serial.available() > 10)
+    {
+        char terminator = '\n';
+        String separator = ",";
+        String incoming_data = Serial.readStringUntil(terminator);
+
+        // split the first part of the message
+        int _delimpos = 0;
+        int _olddelimpos = 0;
+        String _tempsubstr;
+        _delimpos = incoming_data.indexOf(separator, _delimpos);
+        // Assign the axis if it's valid
+        int _axischeck = get_substring(_olddelimpos, _delimpos, incoming_data).toInt();
+        if ((-1 < _axischeck) && (_axischeck < 4))
+        {
+            // valid axis
+            REQUESTED_AXIS = _axischeck;
+            if (REQUESTED_AXIS == 0)
+            {
+                home();
+                return;
+            }
+        }
+        else {
+            Serial.println("BADMSG-AXIS");
+            return;
+        }
+        // Split off the direction
+        _olddelimpos = _delimpos + 1;
+        _delimpos = incoming_data.indexOf(separator, _delimpos+1);
+        int _dircheck = get_substring(_olddelimpos, _delimpos, incoming_data).toInt();
+        if ((-1 < _dircheck) && (_dircheck < 2))
+        {
+            // valid direction request
+            REQUESTED_DIR = _dircheck;
+            Serial.println(get_substring(_olddelimpos, _delimpos, incoming_data));
+        }
+        else {
+            // "is bullshit!" - I. Gharmarian
+            Serial.println("BADMSG-DIRECTION");
+            return;
+        }
+        // Split off the requested steps
+        _olddelimpos = _delimpos + 1;
+        _delimpos = incoming_data.indexOf(separator, _delimpos+1);
+        int _stepcheck = get_substring(_olddelimpos, _delimpos, incoming_data).toInt();
+        if ((-1 < _stepcheck) && (_stepcheck < 25000))
+        {
+            // Valid step request
+            REQUESTED_STEPS = _stepcheck;
+        }
+        else {
+            Serial.println("BADMSG-STEPVALUE");
+            return;
+        }
+
+        // Split off the extra delay
+        _olddelimpos = _delimpos + 1;
+        _delimpos = incoming_data.indexOf(separator, _delimpos+1);
+        int _delayus = get_substring(_olddelimpos, _delimpos, incoming_data).toInt();
+        if (-1 < _delayus)
+        {
+            // valid delay
+            REQUESTED_XTRA_US = _delayus;
+        }
+        else {
+            Serial.println("BADMSG-XTRADELAY");
+            return;
+        }
+        MOVE_REQUESTED = true;
+        Serial.println("MSGOK");
+        Serial.print("REQSTEPS: "); Serial.print(REQUESTED_STEPS);
+        Serial.print(" REQDIR: "); Serial.print(REQUESTED_DIR);
+        Serial.print(" REQAXIS: "); Serial.print(REQUESTED_AXIS);
+        Serial.print(" REQEXTRADELAY: "); Serial.println(REQUESTED_XTRA_US);
+    }
+    return;
+}
+
 /*  get_substring(int begin_pos, int end_pos, String tempstring) -
         get_substring returns a substring of an Arduino String
         as an Arduino string. Use to split incoming messages along
@@ -215,19 +366,4 @@ String get_substring(int begin_pos, int end_pos, String tempstring)
         return_string += tempstring[i];
     }
     return return_string;
-}
-/*  SerialEvent() - ISR that fires when serial data is on the UART.
-*/
-void SerialEvent()
-{
-    /*
-        Serial Message Format:
-        AXIS,DIRECTION,STEPS,EXTRADELAYUS
-        N,N,NNNNNN,NNNNN\n\0
-        length - 20 (incl null termination)
-        n - number
-        dont use windows line endings you dolt.
-        \n only. UART will autoappend \0
-    */
-    return;
 }
